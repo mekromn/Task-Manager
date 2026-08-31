@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.mekromn.taskmanager"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.mekromn.taskmanager"
