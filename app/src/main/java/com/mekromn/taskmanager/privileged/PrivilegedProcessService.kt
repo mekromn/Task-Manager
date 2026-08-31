@@ -33,7 +33,7 @@ class PrivilegedProcessService : IPrivilegedProcessService.Stub {
                 append(code)
             }
         } catch (t: Throwable) {
-            "${t::class.java.simpleName}: ${t.message.orEmpty()}\n$EXIT_MARKER127"
+            "${t::class.java.simpleName}: ${t.message.orEmpty()}\n${EXIT_MARKER}127"
         }
     }
 
