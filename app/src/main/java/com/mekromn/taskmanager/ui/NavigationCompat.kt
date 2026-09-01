@@ -35,7 +35,7 @@ internal fun NavigationBarItem(
 ) {
     val container by animateColorAsState(
         targetValue = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f)
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
         } else {
             Color.Transparent
         },
@@ -43,7 +43,7 @@ internal fun NavigationBarItem(
     )
     val content by animateColorAsState(
         targetValue = if (selected) {
-            MaterialTheme.colorScheme.onPrimaryContainer
+            MaterialTheme.colorScheme.primary
         } else {
             MaterialTheme.colorScheme.onSurfaceVariant
         },
