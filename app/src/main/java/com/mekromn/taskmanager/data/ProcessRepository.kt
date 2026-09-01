@@ -382,7 +382,14 @@ class ProcessRepository(
         getApplicationInfo(normalized)?.let { return normalized to it }
 
         if (uid != null) {
-            val candidates = pm.getPackagesForUid(uid).orEmpty()
+            // A Shizuku/root snapshot can include processes from work profiles and
+            // secondary users. Calling the normal app-process PackageManager with a
+            // cross-user UID throws SecurityException unless the app holds a
+            // signature-only cross-user permission. Package resolution is enrichment,
+            // not a reason to discard/fail an otherwise valid system process snapshot.
+            val candidates = runCatching { pm.getPackagesForUid(uid) }
+                .getOrNull()
+                .orEmpty()
             val preferred = candidates.firstOrNull { candidate ->
                 processName.startsWith(candidate)
             } ?: candidates.firstOrNull()
