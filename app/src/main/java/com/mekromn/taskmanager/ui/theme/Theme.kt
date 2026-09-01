@@ -9,8 +9,10 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material3.LocalContentColor
 import com.mekromn.taskmanager.data.ThemeMode
 
 private val DarkScheme = darkColorScheme(
@@ -71,20 +73,30 @@ fun TaskManagerTheme(
     val context = LocalContext.current
     val systemDark = isSystemInDarkTheme()
 
+    // Keep Material You accent colors, but pin the dark neutral/content roles to
+    // known high-contrast values. This prevents OEM/contrast-setting dynamic
+    // palettes from producing dark text on our deliberately dark translucent UI.
+    val dynamicDark = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        dynamicDarkColorScheme(context).copy(
+            background = DarkScheme.background,
+            onBackground = DarkScheme.onBackground,
+            surface = DarkScheme.surface,
+            onSurface = DarkScheme.onSurface,
+            surfaceVariant = DarkScheme.surfaceVariant,
+            onSurfaceVariant = DarkScheme.onSurfaceVariant,
+            outline = DarkScheme.outline,
+            error = DarkScheme.error
+        )
+    } else DarkScheme
+
     val colorScheme = when (mode) {
         ThemeMode.AMOLED -> AmoledScheme
-        ThemeMode.DARK -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            dynamicDarkColorScheme(context).copy(
-                background = DarkScheme.background,
-                surface = DarkScheme.surface
-            )
-        } else DarkScheme
+        ThemeMode.DARK -> dynamicDark
         ThemeMode.LIGHT -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             dynamicLightColorScheme(context)
         } else LightScheme
         ThemeMode.SYSTEM -> if (systemDark) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) dynamicDarkColorScheme(context)
-            else DarkScheme
+            dynamicDark
         } else {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) dynamicLightColorScheme(context)
             else LightScheme
@@ -93,7 +105,14 @@ fun TaskManagerTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography(),
-        content = content
-    )
+        typography = Typography()
+    ) {
+        // Several screens intentionally use transparent/translucent containers.
+        // Make the app-level inherited content color explicit so Text/Icon never
+        // falls back to the platform's light-theme black when a custom container
+        // color cannot be mapped back to a Material color role.
+        CompositionLocalProvider(LocalContentColor provides colorScheme.onBackground) {
+            content()
+        }
+    }
 }
