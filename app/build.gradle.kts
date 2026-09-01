@@ -5,6 +5,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// GitHub Actions gives every workflow run a monotonically increasing run number.
+// Canonical CI APKs therefore always receive a higher versionCode than older CI APKs.
+val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
+val taskManagerVersionCode = 100_000 + ciRunNumber
+val taskManagerVersionName = "1.0.$ciRunNumber"
+
 android {
     namespace = "com.mekromn.taskmanager"
     compileSdk = 36
@@ -13,8 +19,25 @@ android {
         applicationId = "com.mekromn.taskmanager"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = taskManagerVersionCode
+        versionName = taskManagerVersionName
+    }
+
+    // Intentionally stable DEVELOPMENT signing identity for sideload/update continuity.
+    // This key is public with the source tree and MUST NOT be reused for a production/store release.
+    signingConfigs {
+        create("stableDevelopment") {
+            storeFile = rootProject.file("signing/taskmanager-dev.jks")
+            storePassword = "taskmanager"
+            keyAlias = "taskmanager-dev"
+            keyPassword = "taskmanager"
+        }
+    }
+
+    buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("stableDevelopment")
+        }
     }
 
     buildFeatures {
