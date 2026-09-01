@@ -15,6 +15,14 @@ class MainActivity : ComponentActivity() {
         MainViewModel.Factory(application)
     }
 
+    private val shizukuBinderReceivedListener = Shizuku.OnBinderReceivedListener {
+        viewModel.onResume()
+    }
+
+    private val shizukuBinderDeadListener = Shizuku.OnBinderDeadListener {
+        viewModel.onResume()
+    }
+
     private val shizukuPermissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, _ ->
         if (requestCode == ShizukuClient.REQUEST_CODE) {
             viewModel.onShizukuPermissionResult()
@@ -24,6 +32,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // Sticky is important: if Shizuku delivered the binder before this Activity
+        // registered its listener, the callback still fires immediately.
+        Shizuku.addBinderReceivedListenerSticky(shizukuBinderReceivedListener)
+        Shizuku.addBinderDeadListener(shizukuBinderDeadListener)
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
 
         setContent {
@@ -37,6 +50,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        Shizuku.removeBinderReceivedListener(shizukuBinderReceivedListener)
+        Shizuku.removeBinderDeadListener(shizukuBinderDeadListener)
         Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         super.onDestroy()
     }
