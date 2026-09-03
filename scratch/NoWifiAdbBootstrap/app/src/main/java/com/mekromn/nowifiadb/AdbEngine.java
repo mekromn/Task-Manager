@@ -2,6 +2,8 @@ package com.mekromn.nowifiadb;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -24,6 +26,8 @@ import java.util.regex.Pattern;
 final class AdbEngine {
     static final String PREFS = "no_wifi_adb";
     static final String KEY_CLASSIC_PORT = "classic_port";
+    static final String KEY_RECOVERY_PENDING = "recovery_pending";
+    static final String SHIZUKU_PACKAGE = "moe.shizuku.privileged.api";
 
     interface Logger {
         void log(String value);
@@ -73,6 +77,10 @@ final class AdbEngine {
         return prefs.getInt(KEY_CLASSIC_PORT, 0);
     }
 
+    boolean recoveryPending() {
+        return prefs.getBoolean(KEY_RECOVERY_PENDING, false);
+    }
+
     boolean pairingKeyLooksPresent() {
         File home = context.getFilesDir();
         return new File(home, ".android/adbkey").isFile()
@@ -89,7 +97,7 @@ final class AdbEngine {
         for (int port : candidates) {
             State s = testPort(port, true);
             if (s.active) {
-                prefs.edit().putInt(KEY_CLASSIC_PORT, port).apply();
+                prefs.edit().putInt(KEY_CLASSIC_PORT, port).putBoolean(KEY_RECOVERY_PENDING, false).apply();
                 return s;
             }
         }
@@ -123,20 +131,28 @@ final class AdbEngine {
 
         List<Integer> connectPorts = discoverPorts("_adb-tls-connect._tcp", 9_000L);
         if (connectPorts.isEmpty()) {
+            if (recoveryPending()) {
+                return "WIRELESS DEBUGGING RESTART REQUIRED.\n"
+                        + "Android 16 stopped advertising its Wireless Debugging TLS service when adbd left classic TCP mode. "
+                        + "Your ADB host key is still saved. While connected to Wi-Fi, toggle Wireless debugging OFF then ON and return to No-WiFi ADB; recovery will retry automatically and should not require a new pairing code.";
+            }
             return "NO WIRELESS ADB SERVICE FOUND.\n"
                     + "Turn on Wireless debugging while connected to Wi-Fi, then return here and press Bootstrap again. "
                     + "If this phone has never been paired with this app, use Pair & Bootstrap once.";
         }
 
+        String last = "";
         for (int port : connectPorts) {
             String ep = localEndpoint(port);
             Result connected = connect(ep);
+            last = connected.output;
             if (connected.ok) return convertToClassic(ep);
         }
 
-        return "WIRELESS ADB FOUND, BUT THIS APP IS NOT AUTHORIZED.\n"
+        prefs.edit().putBoolean(KEY_RECOVERY_PENDING, false).apply();
+        return "WIRELESS ADB FOUND, BUT THE SAVED KEY WAS NOT AUTHORIZED.\n"
                 + "Open ‘Pair device with pairing code’, enter the six-digit code in this app, and press Pair & Bootstrap. "
-                + "No IP address or port entry is needed.";
+                + "No IP address or port entry is needed. Last connect result: " + oneLine(last);
     }
 
     String pairAndBootstrap(String code) {
@@ -167,6 +183,7 @@ final class AdbEngine {
         }
         if (!paired) return "PAIR FAILED.\n" + oneLine(last);
 
+        prefs.edit().putBoolean(KEY_RECOVERY_PENDING, false).apply();
         sleep(900);
         List<Integer> connectPorts = discoverPorts("_adb-tls-connect._tcp", 14_000L);
         for (int port : connectPorts) {
@@ -207,15 +224,15 @@ final class AdbEngine {
         if (rawPortOpen(oldPort, 700)) {
             return "PHASE 1 FAILED: the old classic TCP port still answers after ‘adb usb’.\n" + oneLine(usb.output);
         }
-        prefs.edit().remove(KEY_CLASSIC_PORT).apply();
+        prefs.edit().remove(KEY_CLASSIC_PORT).putBoolean(KEY_RECOVERY_PENDING, true).apply();
         log("Phase 1 PASS: classic localhost ADB is confirmed down. Saved host key was preserved.");
 
         log("Phase 2/3: discovering Android Wireless Debugging TLS with the saved key…");
         List<Integer> connectPorts = discoverPorts("_adb-tls-connect._tcp", 14_000L);
         if (connectPorts.isEmpty()) {
-            return "HALFWAY PASS: CLASSIC ADB WAS SUCCESSFULLY SHUT DOWN.\n"
-                    + "Android is not currently advertising a Wireless Debugging TLS service. With Wi-Fi connected, toggle Wireless debugging OFF then ON and press ‘Bootstrap / Repair’. "
-                    + "The saved pairing key is still intact, so a new pairing code should not normally be needed.";
+            return "CLASSIC ADB STOPPED — WIRELESS DEBUGGING RESTART REQUIRED.\n"
+                    + "This is the expected Pixel/Android 16 result we measured: after ‘adb usb’, Android stops advertising _adb-tls-connect._tcp. "
+                    + "The saved pairing key is intact. With Wi-Fi connected, toggle Wireless debugging OFF then ON, then return to this app. v0.5 will automatically retry saved-key recovery.";
         }
 
         String last = "";
@@ -236,16 +253,17 @@ final class AdbEngine {
             return "PHASE 3 FAILED AFTER TLS RECOVERY.\n" + converted;
         }
 
-        return "HALFWAY PASS: Wireless Debugging was advertised, but the saved ADB key did not authenticate.\n"
-                + "Open ‘Pair device with pairing code’ and use Pair & Bootstrap once. Last connect result: " + oneLine(last);
+        prefs.edit().putBoolean(KEY_RECOVERY_PENDING, false).apply();
+        return "WIRELESS DEBUGGING RETURNED, BUT THE SAVED KEY DID NOT AUTHENTICATE.\n"
+                + "Use Pair & Bootstrap once. Last connect result: " + oneLine(last);
     }
 
     String disable() {
         log("=== DISABLE CLASSIC ADB ===");
         State current = detect();
         if (!current.active) {
-            prefs.edit().remove(KEY_CLASSIC_PORT).apply();
-            return "Classic localhost ADB is already inactive.";
+            prefs.edit().remove(KEY_CLASSIC_PORT).putBoolean(KEY_RECOVERY_PENDING, false).apply();
+            return "Classic localhost ADB is already inactive. Automatic recovery was cancelled.";
         }
 
         String ep = localEndpoint(current.port);
@@ -253,8 +271,10 @@ final class AdbEngine {
         log(r.output);
         sleep(1300);
         boolean stillOpen = rawPortOpen(current.port, 650);
-        if (!stillOpen) prefs.edit().remove(KEY_CLASSIC_PORT).apply();
-        return (!stillOpen ? "DISABLED: adbd left TCP mode." : "ADB requested USB mode, but the TCP port still answers.")
+        if (!stillOpen) {
+            prefs.edit().remove(KEY_CLASSIC_PORT).putBoolean(KEY_RECOVERY_PENDING, false).apply();
+        }
+        return (!stillOpen ? "DISABLED: adbd left TCP mode. Automatic recovery is off." : "ADB requested USB mode, but the TCP port still answers.")
                 + (r.output.isEmpty() ? "" : "\n" + oneLine(r.output));
     }
 
@@ -274,18 +294,44 @@ final class AdbEngine {
         if (!current.active) return "No active localhost ADB shell.";
         String ep = localEndpoint(current.port);
 
-        // Match Shizuku's own Starter.internalCommand: execute its installed
-        // native libshizuku.so and pass the installed APK path via --apk=.
+        // v0.4 queried Shizuku with `pm path` from the shell and produced a false
+        // negative on the test Pixel even though the exact package was installed.
+        // v0.5 asks Android PackageManager from this app instead. The manifest's
+        // <queries> declaration makes this single package visible without asking
+        // for QUERY_ALL_PACKAGES or any runtime permission.
+        final ApplicationInfo shizuku;
+        try {
+            shizuku = context.getPackageManager().getApplicationInfo(SHIZUKU_PACKAGE, 0);
+        } catch (PackageManager.NameNotFoundException e) {
+            return "Shizuku package lookup failed in Android PackageManager. Expected package: " + SHIZUKU_PACKAGE;
+        }
+
+        String apk = shizuku.sourceDir;
+        String libDir = shizuku.nativeLibraryDir;
+        if (apk == null || apk.isEmpty()) {
+            return "Shizuku is visible to PackageManager, but sourceDir is empty.";
+        }
+        if (libDir == null || libDir.isEmpty()) {
+            return "Shizuku is visible to PackageManager, but nativeLibraryDir is empty. APK=" + apk;
+        }
+
+        String starter = libDir + File.separator + "libshizuku.so";
+        log("Shizuku PackageManager sourceDir=" + apk);
+        log("Shizuku PackageManager nativeLibraryDir=" + libDir);
+        log("Shizuku expected starter=" + starter);
+
+        // Match current Shizuku's Starter.internalCommand exactly in spirit:
+        // <nativeLibraryDir>/libshizuku.so --apk=<sourceDir>.
         String command =
-                "PKG='moe.shizuku.privileged.api'; "
-                + "APK=\"$(pm path \"$PKG\" 2>/dev/null | sed -n '1s/^package://p')\"; "
-                + "if [ -z \"$APK\" ]; then echo SHIZUKU_NOT_INSTALLED; exit 20; fi; "
-                + "LIBDIR=\"$(dumpsys package \"$PKG\" 2>/dev/null | sed -n 's/^[[:space:]]*nativeLibraryDir=//p' | head -n1)\"; "
-                + "STARTER=''; "
-                + "if [ -n \"$LIBDIR\" ] && [ -x \"$LIBDIR/libshizuku.so\" ]; then STARTER=\"$LIBDIR/libshizuku.so\"; fi; "
-                + "if [ -z \"$STARTER\" ]; then STARTER=\"$(find \"$(dirname \"$APK\")\" -type f -name libshizuku.so -print 2>/dev/null | head -n1)\"; fi; "
-                + "if [ -z \"$STARTER\" ] || [ ! -x \"$STARTER\" ]; then echo SHIZUKU_STARTER_NOT_FOUND; echo APK=\"$APK\"; echo LIBDIR=\"$LIBDIR\"; exit 21; fi; "
-                + "echo SHIZUKU_STARTER=\"$STARTER\"; echo SHIZUKU_APK=\"$APK\"; "
+                "APK=" + shellQuote(apk) + "; "
+                + "STARTER=" + shellQuote(starter) + "; "
+                + "echo SHIZUKU_APK=\"$APK\"; echo SHIZUKU_STARTER=\"$STARTER\"; "
+                + "if [ ! -f \"$APK\" ]; then echo SHIZUKU_APK_NOT_READABLE; ls -ld \"$(dirname \"$APK\")\" 2>/dev/null || true; exit 22; fi; "
+                + "if [ ! -x \"$STARTER\" ]; then "
+                + "  echo SHIZUKU_EXPECTED_STARTER_NOT_EXECUTABLE; "
+                + "  ALT=\"$(find \"$(dirname \"$APK\")\" -type f -name libshizuku.so -print 2>/dev/null | head -n1)\"; "
+                + "  if [ -n \"$ALT\" ] && [ -x \"$ALT\" ]; then STARTER=\"$ALT\"; echo SHIZUKU_FALLBACK_STARTER=\"$STARTER\"; else exit 21; fi; "
+                + "fi; "
                 + "\"$STARTER\" --apk=\"$APK\"; RC=$?; "
                 + "sleep 1; PID=\"$(pidof shizuku_server 2>/dev/null || true)\"; "
                 + "if [ -n \"$PID\" ]; then echo SHIZUKU_SERVER_RUNNING pid=\"$PID\"; fi; exit $RC";
@@ -293,11 +339,12 @@ final class AdbEngine {
         Result start = adb(Arrays.asList("-s", ep, "shell", "sh", "-c", command), null, 35);
         log(start.output);
 
-        if (start.output.contains("SHIZUKU_NOT_INSTALLED")) {
-            return "Shizuku is not installed (package moe.shizuku.privileged.api was not found).";
+        if (start.output.contains("SHIZUKU_APK_NOT_READABLE")) {
+            return "Shizuku was found by Android, but the ADB shell could not read its APK path.\n" + start.output;
         }
-        if (start.output.contains("SHIZUKU_STARTER_NOT_FOUND")) {
-            return "Shizuku is installed, but its native libshizuku.so starter could not be located.\n" + start.output;
+        if (start.output.contains("SHIZUKU_EXPECTED_STARTER_NOT_EXECUTABLE")
+                && !start.output.contains("SHIZUKU_FALLBACK_STARTER")) {
+            return "Shizuku was found, but libshizuku.so was not executable at Android's reported nativeLibraryDir.\n" + start.output;
         }
 
         boolean success = start.output.contains("SHIZUKU_SERVER_RUNNING")
@@ -340,7 +387,7 @@ final class AdbEngine {
         }
 
         if (state != null && state.active) {
-            prefs.edit().putInt(KEY_CLASSIC_PORT, newPort).apply();
+            prefs.edit().putInt(KEY_CLASSIC_PORT, newPort).putBoolean(KEY_RECOVERY_PENDING, false).apply();
             return "SUCCESS: NO-WIFI ADB IS ACTIVE\n"
                     + "localhost=" + localEndpoint(newPort) + "\n"
                     + state.identity + "\n\n"
@@ -492,6 +539,11 @@ final class AdbEngine {
 
     private void log(String value) {
         if (logger != null && value != null && !value.isEmpty()) logger.log(value);
+    }
+
+    private static String shellQuote(String value) {
+        if (value == null) return "''";
+        return "'" + value.replace("'", "'\\\"'\\\"'") + "'";
     }
 
     private static String oneLine(String value) {
