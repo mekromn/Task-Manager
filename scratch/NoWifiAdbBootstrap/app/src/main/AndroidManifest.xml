@@ -6,6 +6,12 @@
          authenticated ADB client only needs normal socket access. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Android 11+ package visibility: expose only the one optional companion we
+         integrate with. This is not a permission and does not grant Shizuku access. -->
+    <queries>
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:extractNativeLibs="true"
