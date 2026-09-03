@@ -53,22 +53,36 @@ public final class MainActivity extends Activity {
     private EditText pairingCode;
     private EditText shellCommand;
     private TextView shellOutput;
+    private boolean autoRecoveryQueued;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         engine = new AdbEngine(this, this::append);
         setContentView(buildUi());
-        append("No-WiFi ADB v0.4");
+        append("No-WiFi ADB v0.5");
         append("Production path: real Android adbd → authenticated classic TCP → localhost uid=2000(shell).");
         append("No root, Shizuku dependency, location permission, Wi-Fi-control permission, or protected-settings grant is used by this build.");
-        refreshState("Checking local ADB…");
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (engine != null) refreshState("Checking local ADB…");
+        if (engine == null) return;
+
+        if (engine.recoveryPending() && !autoRecoveryQueued) {
+            autoRecoveryQueued = true;
+            runAction("RECOVERING SAVED ADB KEY", engine::smartBootstrap, output -> {
+                autoRecoveryQueued = false;
+                if (engine.recoveryPending()) {
+                    statusTitle.setText("RECOVERY · RESTART WIRELESS DEBUGGING");
+                    statusTitle.setTextColor(AMBER);
+                    statusDetail.setText("Saved key intact. Toggle Wireless debugging OFF → ON while connected to Wi-Fi, then return here; v0.5 retries automatically.");
+                }
+            });
+        } else {
+            refreshState("Checking local ADB…");
+        }
     }
 
     @Override
@@ -131,9 +145,10 @@ public final class MainActivity extends Activity {
 
         root.addView(section("Lifecycle validation"));
         root.addView(text(
-                "This is the real recovery test. It deliberately shuts down the currently working classic TCP transport, confirms that it is gone, then tries to find Wireless Debugging with the saved host key and rebuild a new random localhost port. If Android stops advertising Wireless Debugging after adb restarts, you may need to toggle Wireless debugging once to finish repair.",
+                "Your Pixel test proved that after ‘adb usb’ Android 16 removes the Wireless Debugging TLS advertisement. The saved ADB key survives. This validation test intentionally shuts classic TCP down; if TLS disappears, v0.5 records a recovery-pending state. Toggle Wireless debugging OFF → ON once, return here, and the app automatically retries the saved key and rebuilds a random localhost port.",
                 13, AMBER, false), margins(0, 4, 0, 7));
         root.addView(dangerButton("Full repair test: shut down → recover", v -> confirmFullRepairTest()));
+        root.addView(secondaryButton("Open Wireless debugging for recovery", v -> openWirelessDebugging()));
 
         root.addView(section("ADB shell"));
         root.addView(text(
@@ -158,7 +173,7 @@ public final class MainActivity extends Activity {
 
         root.addView(section("Security & reboot behavior"));
         root.addView(text(
-                "ADB authentication remains enabled. New bootstraps use a random high TCP port instead of 5555. Stock ‘adb tcpip’ still listens on network interfaces, not only loopback, so while Wi-Fi remains connected the port can also exist on the LAN; authentication is the security boundary. Turning Wi-Fi off leaves our localhost route. A full reboot restarts adbd and requires another bootstrap.",
+                "ADB authentication remains enabled. New bootstraps use a random high TCP port instead of 5555. Stock ‘adb tcpip’ still listens on network interfaces, not only loopback, so while Wi-Fi remains connected the port can also exist on the LAN; authentication is the security boundary. Turning Wi-Fi off leaves our localhost route. A full reboot restarts adbd and still requires a bootstrap path.",
                 13, AMBER, false), margins(0, 4, 0, 8));
 
         root.addView(section("Diagnostic log"));
@@ -205,10 +220,22 @@ public final class MainActivity extends Activity {
     private void confirmFullRepairTest() {
         new AlertDialog.Builder(this)
                 .setTitle("Run full repair test?")
-                .setMessage("This intentionally shuts down the working classic ADB transport first. If Android does not keep Wireless debugging advertised after the restart, No-WiFi ADB will remain inactive until you toggle Wireless debugging and press Bootstrap / Repair. Your saved pairing key is preserved.")
+                .setMessage("This intentionally shuts down the working classic ADB transport first. On this Pixel/Android 16 build, the measured result is that Android then stops advertising Wireless Debugging until its switch is restarted. Your saved pairing key is preserved. If that occurs, v0.5 will ask you to toggle Wireless debugging OFF → ON and automatically retry when you return.")
                 .setNegativeButton("Cancel", null)
                 .setPositiveButton("Run test", (dialog, which) ->
-                        runAction("FULL REPAIR TEST", engine::fullRepairTest, null))
+                        runAction("FULL REPAIR TEST", engine::fullRepairTest, output -> {
+                            if (engine.recoveryPending()) showRecoveryPrompt();
+                        }))
+                .show();
+    }
+
+    private void showRecoveryPrompt() {
+        if (isFinishing() || isDestroyed()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("Restart Wireless debugging")
+                .setMessage("Classic TCP ADB is confirmed stopped and your saved ADB key is still intact. Android 16 removed the Wireless Debugging TLS service. While connected to Wi-Fi, open Wireless debugging, toggle it OFF then ON, then return here. No-WiFi ADB will automatically try the saved key.")
+                .setNegativeButton("Later", null)
+                .setPositiveButton("Open Wireless debugging", (dialog, which) -> openWirelessDebugging())
                 .show();
     }
 
@@ -254,6 +281,10 @@ public final class MainActivity extends Activity {
             statusTitle.setText("ACTIVE · NO-WIFI ADB READY");
             statusTitle.setTextColor(GREEN);
             statusDetail.setText("127.0.0.1:" + state.port + " · verified uid=2000(shell) / u:r:shell:s0");
+        } else if (engine.recoveryPending()) {
+            statusTitle.setText("RECOVERY · RESTART WIRELESS DEBUGGING");
+            statusTitle.setTextColor(AMBER);
+            statusDetail.setText("Saved key intact. Toggle Wireless debugging OFF → ON while connected to Wi-Fi, then return here; recovery retries automatically.");
         } else {
             statusTitle.setText("INACTIVE · BOOTSTRAP NEEDED");
             statusTitle.setTextColor(BLUE);
