@@ -1,6 +1,7 @@
 package com.mekromn.nowifiadb;
 
 import android.app.Activity;
+import android.app.StatusBarManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
@@ -269,8 +270,12 @@ public final class MainActivity extends Activity {
     private void requestTile() {
         if (Build.VERSION.SDK_INT >= 33) {
             try {
-                TileService.requestAddTileService(
-                        this,
+                StatusBarManager statusBarManager = getSystemService(StatusBarManager.class);
+                if (statusBarManager == null) {
+                    toast("Open Quick Settings edit and add No-WiFi ADB manually");
+                    return;
+                }
+                statusBarManager.requestAddTileService(
                         new ComponentName(this, AdbTileService.class),
                         "No-WiFi ADB",
                         Icon.createWithResource(this, R.drawable.ic_adb_tile),
@@ -280,7 +285,7 @@ public final class MainActivity extends Activity {
                 toast("Open Quick Settings edit and add No-WiFi ADB manually");
             }
         } else {
-            toast("Open Quick Settings edit and add No-WiFi ADB");
+            toast("Open Quick Settings edit and add No-WiFi ADB manually");
         }
     }
 
