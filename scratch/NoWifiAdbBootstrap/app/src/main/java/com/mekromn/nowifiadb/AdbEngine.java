@@ -83,7 +83,7 @@ final class AdbEngine {
         Set<Integer> candidates = new LinkedHashSet<>();
         int saved = savedPort();
         if (validPort(saved)) candidates.add(saved);
-        // v0.2 used 5555. Keeping this migration probe lets v0.3 install directly over it.
+        // v0.2 used 5555. Keep probing it so upgrades can migrate an older live session.
         candidates.add(5555);
 
         for (int port : candidates) {
@@ -186,6 +186,60 @@ final class AdbEngine {
         return convertToClassic(localEndpoint(current.port));
     }
 
+    String fullRepairTest() {
+        log("=== FULL REPAIR LIFECYCLE TEST ===");
+        State current = detect();
+        if (!current.active) {
+            return "FULL REPAIR TEST NEEDS AN ACTIVE LOCALHOST SESSION FIRST.\n"
+                    + "Restore No-WiFi ADB, then run this test. It deliberately shuts the classic transport down before attempting saved-key recovery.";
+        }
+        if (!pairingKeyLooksPresent()) {
+            return "FULL REPAIR TEST STOPPED: no saved ADB host key was found. Pair this app before intentionally shutting down the working transport.";
+        }
+
+        int oldPort = current.port;
+        String oldEndpoint = localEndpoint(oldPort);
+        log("Phase 1/3: deliberately returning adbd to USB mode through " + oldEndpoint);
+        Result usb = adb(Arrays.asList("-s", oldEndpoint, "usb"), null, 14);
+        log(usb.output);
+        sleep(1700);
+
+        if (rawPortOpen(oldPort, 700)) {
+            return "PHASE 1 FAILED: the old classic TCP port still answers after ‘adb usb’.\n" + oneLine(usb.output);
+        }
+        prefs.edit().remove(KEY_CLASSIC_PORT).apply();
+        log("Phase 1 PASS: classic localhost ADB is confirmed down. Saved host key was preserved.");
+
+        log("Phase 2/3: discovering Android Wireless Debugging TLS with the saved key…");
+        List<Integer> connectPorts = discoverPorts("_adb-tls-connect._tcp", 14_000L);
+        if (connectPorts.isEmpty()) {
+            return "HALFWAY PASS: CLASSIC ADB WAS SUCCESSFULLY SHUT DOWN.\n"
+                    + "Android is not currently advertising a Wireless Debugging TLS service. With Wi-Fi connected, toggle Wireless debugging OFF then ON and press ‘Bootstrap / Repair’. "
+                    + "The saved pairing key is still intact, so a new pairing code should not normally be needed.";
+        }
+
+        String last = "";
+        for (int port : connectPorts) {
+            String ep = localEndpoint(port);
+            Result connected = connect(ep);
+            last = connected.output;
+            if (!connected.ok) continue;
+
+            log("Phase 2 PASS: saved key authenticated to " + ep);
+            log("Phase 3/3: converting the recovered TLS transport back to random classic TCP…");
+            String converted = convertToClassic(ep);
+            if (converted.contains("SUCCESS: NO-WIFI ADB IS ACTIVE")) {
+                return "FULL REPAIR PASS\n"
+                        + "Classic TCP was intentionally stopped, the saved Wireless Debugging key re-authenticated, and localhost uid=2000(shell) was rebuilt.\n\n"
+                        + converted;
+            }
+            return "PHASE 3 FAILED AFTER TLS RECOVERY.\n" + converted;
+        }
+
+        return "HALFWAY PASS: Wireless Debugging was advertised, but the saved ADB key did not authenticate.\n"
+                + "Open ‘Pair device with pairing code’ and use Pair & Bootstrap once. Last connect result: " + oneLine(last);
+    }
+
     String disable() {
         log("=== DISABLE CLASSIC ADB ===");
         State current = detect();
@@ -219,14 +273,39 @@ final class AdbEngine {
         State current = detect();
         if (!current.active) return "No active localhost ADB shell.";
         String ep = localEndpoint(current.port);
-        String script = "/storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh";
-        Result exists = adb(Arrays.asList("-s", ep, "shell", "sh", "-c", "[ -f '" + script + "' ] && echo FOUND || echo MISSING"), null, 10);
-        if (!exists.output.contains("FOUND")) {
-            return "Shizuku starter script was not found. Install/open Shizuku once so its ADB starter is available.";
-        }
-        Result start = adb(Arrays.asList("-s", ep, "shell", "sh", script), null, 30);
+
+        // Match Shizuku's own Starter.internalCommand: execute its installed
+        // native libshizuku.so and pass the installed APK path via --apk=.
+        String command =
+                "PKG='moe.shizuku.privileged.api'; "
+                + "APK=\"$(pm path \"$PKG\" 2>/dev/null | sed -n '1s/^package://p')\"; "
+                + "if [ -z \"$APK\" ]; then echo SHIZUKU_NOT_INSTALLED; exit 20; fi; "
+                + "LIBDIR=\"$(dumpsys package \"$PKG\" 2>/dev/null | sed -n 's/^[[:space:]]*nativeLibraryDir=//p' | head -n1)\"; "
+                + "STARTER=''; "
+                + "if [ -n \"$LIBDIR\" ] && [ -x \"$LIBDIR/libshizuku.so\" ]; then STARTER=\"$LIBDIR/libshizuku.so\"; fi; "
+                + "if [ -z \"$STARTER\" ]; then STARTER=\"$(find \"$(dirname \"$APK\")\" -type f -name libshizuku.so -print 2>/dev/null | head -n1)\"; fi; "
+                + "if [ -z \"$STARTER\" ] || [ ! -x \"$STARTER\" ]; then echo SHIZUKU_STARTER_NOT_FOUND; echo APK=\"$APK\"; echo LIBDIR=\"$LIBDIR\"; exit 21; fi; "
+                + "echo SHIZUKU_STARTER=\"$STARTER\"; echo SHIZUKU_APK=\"$APK\"; "
+                + "\"$STARTER\" --apk=\"$APK\"; RC=$?; "
+                + "sleep 1; PID=\"$(pidof shizuku_server 2>/dev/null || true)\"; "
+                + "if [ -n \"$PID\" ]; then echo SHIZUKU_SERVER_RUNNING pid=\"$PID\"; fi; exit $RC";
+
+        Result start = adb(Arrays.asList("-s", ep, "shell", "sh", "-c", command), null, 35);
         log(start.output);
-        return (start.exitCode == 0 ? "Shizuku start command completed." : "Shizuku start command failed (exit=" + start.exitCode + ").")
+
+        if (start.output.contains("SHIZUKU_NOT_INSTALLED")) {
+            return "Shizuku is not installed (package moe.shizuku.privileged.api was not found).";
+        }
+        if (start.output.contains("SHIZUKU_STARTER_NOT_FOUND")) {
+            return "Shizuku is installed, but its native libshizuku.so starter could not be located.\n" + start.output;
+        }
+
+        boolean success = start.output.contains("SHIZUKU_SERVER_RUNNING")
+                || start.output.contains("shizuku_starter exit with 0");
+        if (success) {
+            return "SHIZUKU STARTED THROUGH NO-WIFI ADB.\n" + start.output;
+        }
+        return "Shizuku starter ran but server verification did not succeed (exit=" + start.exitCode + ")."
                 + (start.output.isEmpty() ? "" : "\n" + start.output);
     }
 
@@ -365,7 +444,7 @@ final class AdbEngine {
             ProcessBuilder pb = new ProcessBuilder(command);
             pb.directory(context.getFilesDir());
             pb.redirectErrorStream(true);
-            // This is intentionally stable app-private storage. adb pair's host key survives APK updates.
+            // Stable app-private HOME makes adb pair's host key survive normal APK updates.
             pb.environment().put("HOME", context.getFilesDir().getAbsolutePath());
             pb.environment().put("TMPDIR", context.getCacheDir().getAbsolutePath());
             process = pb.start();
