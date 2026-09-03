@@ -3,8 +3,8 @@ plugins {
 }
 
 val ciRunNumber = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0
-val noWifiAdbVersionCode = 200_000 + ciRunNumber
-val noWifiAdbVersionName = "0.4.$ciRunNumber"
+val noWifiAdbVersionCode = 300_000 + ciRunNumber
+val noWifiAdbVersionName = "0.5.$ciRunNumber"
 
 android {
     namespace = "com.mekromn.nowifiadb"
