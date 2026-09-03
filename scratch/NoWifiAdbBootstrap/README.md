@@ -1,15 +1,17 @@
-# No-WiFi ADB v0.2
+# No-WiFi ADB v0.3
 
-Rootless Android experiment for converting an already-authorized Android Wireless Debugging connection into classic ADB TCP on localhost:5555.
+Rootless Android 16 experiment for recovering ADB after reboot without joining an external Wi-Fi network.
 
-## Important limitation
+## One-time preparation
 
-The bootstrap requires one working ADB transport (Wireless Debugging or USB) after each full reboot. Once `adb tcpip 5555` succeeds, the phone can disconnect from Wi-Fi and the app can use `127.0.0.1:5555` until adbd is reset or the phone reboots.
+Install v0.3 over v0.2 while the proven `127.0.0.1:5555` ADB shell is still alive. v0.3 declares `WRITE_SECURE_SETTINGS` and uses that already-authorized shell to grant the protected permission to itself once. The package, app data, paired ADB host key, and permission grant survive ordinary reboots.
 
-## Why this route
+## Reboot recovery experiment
 
-Pixel 9 Pro XL / Android 16 testing showed that LocalOnlyHotspot can start and STA+AP concurrency is supported, but the phone refuses to associate its STA interface to its own SoftAP and `WifiManager.getConnectionInfo()` remains networkId=-1. Therefore the fake/self-Wi-Fi route cannot satisfy Android's Wireless Debugging framework check on this device.
+After reboot with normal Wi-Fi unavailable, the app starts a public-API `LocalOnlyHotspot`, rapidly cycles `Settings.Global` key `adb_wifi_enabled`, and scans `_adb-tls-connect._tcp`. This automates the Android 16 hotspot / Wireless Debugging race reported and reproduced publicly in March 2026. If the encrypted local ADB service survives long enough, the already-paired embedded ADB client connects to it and immediately sends `adb tcpip 5555`, restoring the same `uid=2000(shell)` localhost path proven by v0.2.
+
+LocalOnlyHotspot may not trigger the exact race on every Pixel build. v0.3 keeps a manual Mobile Hotspot fallback button for that case.
 
 ## ADB binary
 
-CI downloads the arm64 `libadb.so` from LADB commit `60f48029cf9d8e0bc848ca41a7bd76694d4ab796` and packages it as an executable native library. LADB's license is reproduced in `licenses/LADB-LICENSE.txt`. This project must not be uploaded to Google Play under that license.
+CI downloads the arm64 `libadb.so` from LADB commit `60f48029cf9d8e0bc848ca41a7bd76694d4ab796` and packages it as an executable native library. LADB's license is reproduced in `licenses/LADB-LICENSE.txt`.
