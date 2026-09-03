@@ -1,0 +1,60 @@
+name: Build No-WiFi ADB Probe
+
+on:
+  push:
+    branches: [ "scratch/no-wifi-adb-probe" ]
+    paths:
+      - "scratch/NoWifiAdbProbe/**"
+      - ".github/workflows/no-wifi-adb-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: scratch/NoWifiAdbProbe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Compile debug APK
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifacts
+          cp app/build/outputs/apk/debug/app-debug.apk artifacts/NoWifiAdbProbe-v0.1-debug.apk
+          sha256sum artifacts/NoWifiAdbProbe-v0.1-debug.apk > artifacts/NoWifiAdbProbe-v0.1-debug.apk.sha256
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs artifacts/NoWifiAdbProbe-v0.1-debug.apk
+
+      - name: Upload probe APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NoWifiAdbProbe-APK
+          path: scratch/NoWifiAdbProbe/artifacts/
+          if-no-files-found: error
