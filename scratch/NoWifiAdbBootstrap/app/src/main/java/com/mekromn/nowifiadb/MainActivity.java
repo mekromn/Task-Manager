@@ -1,6 +1,7 @@
 package com.mekromn.nowifiadb;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.StatusBarManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -58,7 +59,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         engine = new AdbEngine(this, this::append);
         setContentView(buildUi());
-        append("No-WiFi ADB v0.3");
+        append("No-WiFi ADB v0.4");
         append("Production path: real Android adbd → authenticated classic TCP → localhost uid=2000(shell).");
         append("No root, Shizuku dependency, location permission, Wi-Fi-control permission, or protected-settings grant is used by this build.");
         refreshState("Checking local ADB…");
@@ -128,6 +129,12 @@ public final class MainActivity extends Activity {
         root.addView(secondaryButton("Start Shizuku through localhost ADB", v -> startShizuku()));
         root.addView(dangerButton("Disable classic TCP ADB", v -> disableAdb()));
 
+        root.addView(section("Lifecycle validation"));
+        root.addView(text(
+                "This is the real recovery test. It deliberately shuts down the currently working classic TCP transport, confirms that it is gone, then tries to find Wireless Debugging with the saved host key and rebuild a new random localhost port. If Android stops advertising Wireless Debugging after adb restarts, you may need to toggle Wireless debugging once to finish repair.",
+                13, AMBER, false), margins(0, 4, 0, 7));
+        root.addView(dangerButton("Full repair test: shut down → recover", v -> confirmFullRepairTest()));
+
         root.addView(section("ADB shell"));
         root.addView(text(
                 "Commands run with the same uid=2000(shell) context you proved in v0.2.",
@@ -193,6 +200,16 @@ public final class MainActivity extends Activity {
 
     private void startShizuku() {
         runAction("STARTING SHIZUKU", engine::startShizuku, null);
+    }
+
+    private void confirmFullRepairTest() {
+        new AlertDialog.Builder(this)
+                .setTitle("Run full repair test?")
+                .setMessage("This intentionally shuts down the working classic ADB transport first. If Android does not keep Wireless debugging advertised after the restart, No-WiFi ADB will remain inactive until you toggle Wireless debugging and press Bootstrap / Repair. Your saved pairing key is preserved.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Run test", (dialog, which) ->
+                        runAction("FULL REPAIR TEST", engine::fullRepairTest, null))
+                .show();
     }
 
     private void runShell() {
