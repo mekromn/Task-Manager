@@ -3,11 +3,16 @@ package com.mekromn.nowifiadb;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.Icon;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.service.quicksettings.TileService;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -20,41 +25,48 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Date;
-import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 public final class MainActivity extends Activity {
+    private static final int BG = Color.rgb(5, 7, 10);
+    private static final int CARD = Color.rgb(17, 23, 31);
+    private static final int CARD_2 = Color.rgb(24, 30, 39);
+    private static final int TEXT_2 = Color.rgb(188, 197, 210);
+    private static final int BLUE = Color.rgb(126, 211, 255);
+    private static final int GREEN = Color.rgb(125, 235, 166);
+    private static final int AMBER = Color.rgb(255, 197, 112);
+
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final StringBuilder log = new StringBuilder();
 
-    private TextView status;
+    private AdbEngine engine;
+    private TextView statusTitle;
+    private TextView statusDetail;
+    private TextView keyState;
     private TextView logView;
-    private EditText pairingEndpoint;
     private EditText pairingCode;
-    private EditText debugEndpoint;
+    private EditText shellCommand;
+    private TextView shellOutput;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        engine = new AdbEngine(this, this::append);
         setContentView(buildUi());
-        append("No-WiFi ADB v0.2");
-        append("Purpose: bootstrap classic adbd TCP on 127.0.0.1:5555, then keep ADB shell access with Wi-Fi disconnected.");
-        append("This is rootless, but one working ADB transport is required after each full reboot.");
-        runAsync("Checking localhost:5555", this::testLocalhostInternal);
+        append("No-WiFi ADB v0.3");
+        append("Production path: real Android adbd → authenticated classic TCP → localhost uid=2000(shell).");
+        append("No root, Shizuku dependency, location permission, Wi-Fi-control permission, or protected-settings grant is used by this build.");
+        refreshState("Checking local ADB…");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (engine != null) refreshState("Checking local ADB…");
     }
 
     @Override
@@ -65,96 +77,262 @@ public final class MainActivity extends Activity {
 
     private View buildUi() {
         ScrollView outer = new ScrollView(this);
+        outer.setFillViewport(true);
+        outer.setBackgroundColor(BG);
+
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(16), dp(18), dp(24));
-        root.setBackgroundColor(Color.rgb(5, 7, 10));
+        root.setPadding(dp(18), dp(16), dp(18), dp(30));
+        root.setBackgroundColor(BG);
         outer.addView(root, new ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        // Android 15/16 enforce edge-to-edge for targetSdk 35+, so consume the
-        // real system-bar insets instead of letting the title/buttons sit under them.
+
         root.setOnApplyWindowInsetsListener((v, insets) -> {
             android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-            v.setPadding(dp(18) + bars.left, dp(16) + bars.top, dp(18) + bars.right, dp(24) + bars.bottom);
+            v.setPadding(dp(18) + bars.left, dp(16) + bars.top, dp(18) + bars.right, dp(30) + bars.bottom);
             return insets;
         });
         root.requestApplyInsets();
 
-        TextView title = text("No-WiFi ADB", 29, Color.WHITE, true);
-        root.addView(title);
-        TextView sub = text(
-                "Rootless localhost ADB. Use Android Wireless Debugging only to bootstrap adbd into classic TCP mode; after that, 127.0.0.1:5555 does not need a Wi-Fi network.",
-                15, Color.rgb(185, 194, 208), false);
-        root.addView(sub, margins(0, 5, 0, 14));
+        root.addView(text("No-WiFi ADB", 30, Color.WHITE, true));
+        root.addView(text(
+                "Full ADB shell on this phone through localhost. Wireless debugging is only the bootstrap; after success you can disconnect Wi-Fi completely.",
+                15, TEXT_2, false), margins(0, 5, 0, 14));
 
-        status = text("Checking…", 16, Color.rgb(138, 216, 255), true);
-        status.setPadding(dp(14), dp(12), dp(14), dp(12));
-        status.setBackgroundColor(Color.rgb(18, 25, 34));
-        root.addView(status, matchWrap());
+        LinearLayout stateCard = new LinearLayout(this);
+        stateCard.setOrientation(LinearLayout.VERTICAL);
+        stateCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+        stateCard.setBackground(round(CARD, 18));
+        statusTitle = text("CHECKING", 18, BLUE, true);
+        statusDetail = text("Looking for an existing localhost ADB shell…", 14, TEXT_2, false);
+        keyState = text("ADB host key: checking…", 13, Color.rgb(150, 161, 176), false);
+        stateCard.addView(statusTitle);
+        stateCard.addView(statusDetail, margins(0, 4, 0, 0));
+        stateCard.addView(keyState, margins(0, 6, 0, 0));
+        root.addView(stateCard, matchWrap());
 
-        TextView limitation = text(
-                "Important: this survives Wi-Fi loss, not a full reboot. After reboot, stock Android 16 requires a new ADB bootstrap unless root or a privileged system modification is used.",
-                14, Color.rgb(255, 199, 120), true);
-        root.addView(limitation, margins(0, 12, 0, 14));
+        root.addView(primaryButton("Bootstrap / Repair No-WiFi ADB", v -> bootstrap()));
+        root.addView(secondaryButton("Open Wireless debugging", v -> openWirelessDebugging()));
 
-        root.addView(section("Bootstrap inputs"));
-        pairingEndpoint = input("Pairing address:port (or just pairing port)", false);
+        root.addView(section("First-time pairing only"));
+        root.addView(text(
+                "Normally you only pair once. Open Wireless debugging → Pair device with pairing code. Leave that dialog visible, enter only its six-digit code below, then tap Pair & Bootstrap. The app discovers both ports automatically.",
+                14, TEXT_2, false), margins(0, 4, 0, 8));
         pairingCode = input("6-digit pairing code", true);
-        debugEndpoint = input("Wireless debugging IP address & port (or just port)", false);
-        root.addView(pairingEndpoint, margins(0, 6, 0, 6));
         root.addView(pairingCode, margins(0, 0, 0, 6));
-        root.addView(debugEndpoint, margins(0, 0, 0, 10));
+        root.addView(secondaryButton("Pair & Bootstrap", v -> pairAndBootstrap()));
 
-        root.addView(button("Open Wireless debugging settings", v -> openWirelessDebugging()));
-        root.addView(button("Automatic: Pair → TCP 5555 → localhost shell", v -> autoBootstrap()));
-        root.addView(button("Pair only", v -> pairOnly()));
-        root.addView(button("Connect current Wireless ADB", v -> connectWirelessOnly()));
-        root.addView(button("Bootstrap TCP 5555 (already paired)", v -> bootstrapOnly()));
-        root.addView(button("Test localhost:5555 shell", v -> runAsync("Testing localhost:5555", this::testLocalhostInternal)));
-        root.addView(button("Disable classic TCP / return adbd to USB", v -> disableTcp()));
+        root.addView(section("Active controls"));
+        root.addView(secondaryButton("Verify uid=2000 localhost shell", v -> verify()));
+        root.addView(secondaryButton("Rotate to a new random high port", v -> rotatePort()));
+        root.addView(secondaryButton("Start Shizuku through localhost ADB", v -> startShizuku()));
+        root.addView(dangerButton("Disable classic TCP ADB", v -> disableAdb()));
 
-        TextView steps = text(
-                "First-time test: while connected to any normal Wi-Fi, open Wireless debugging → Pair device with pairing code. Enter the pairing address/port + code above, and also copy the main screen's IP address & port. Tap Automatic. When it reports uid=2000(shell), disconnect Wi-Fi completely and tap Test localhost:5555 shell.",
-                14, Color.rgb(180, 188, 200), false);
-        root.addView(steps, margins(0, 14, 0, 14));
+        root.addView(section("ADB shell"));
+        root.addView(text(
+                "Commands run with the same uid=2000(shell) context you proved in v0.2.",
+                14, TEXT_2, false), margins(0, 4, 0, 7));
+        shellCommand = input("Shell command", false);
+        shellCommand.setText("id");
+        root.addView(shellCommand, margins(0, 0, 0, 6));
+        root.addView(secondaryButton("Run shell command", v -> runShell()));
+        shellOutput = text("", 13, Color.rgb(218, 225, 234), false);
+        shellOutput.setTypeface(android.graphics.Typeface.MONOSPACE);
+        shellOutput.setTextIsSelectable(true);
+        shellOutput.setPadding(dp(12), dp(12), dp(12), dp(12));
+        shellOutput.setBackground(round(Color.rgb(11, 15, 20), 14));
+        root.addView(shellOutput, margins(0, 8, 0, 0));
+
+        root.addView(section("Quick Settings"));
+        root.addView(text(
+                "The tile shows whether the saved localhost port is listening. When active, tapping it disables classic TCP ADB; when inactive, tapping it opens this app.",
+                14, TEXT_2, false), margins(0, 4, 0, 7));
+        root.addView(secondaryButton("Add No-WiFi ADB Quick Settings tile", v -> requestTile()));
+
+        root.addView(section("Security & reboot behavior"));
+        root.addView(text(
+                "ADB authentication remains enabled. New bootstraps use a random high TCP port instead of 5555. Stock ‘adb tcpip’ still listens on network interfaces, not only loopback, so while Wi-Fi remains connected the port can also exist on the LAN; authentication is the security boundary. Turning Wi-Fi off leaves our localhost route. A full reboot restarts adbd and requires another bootstrap.",
+                13, AMBER, false), margins(0, 4, 0, 8));
 
         root.addView(section("Diagnostic log"));
-        root.addView(button("Copy full log", v -> copyLog()));
-        logView = text("", 12, Color.rgb(213, 219, 228), false);
+        root.addView(secondaryButton("Copy full diagnostic log", v -> copyLog()));
+        logView = text("", 12, Color.rgb(205, 213, 223), false);
         logView.setTypeface(android.graphics.Typeface.MONOSPACE);
         logView.setTextIsSelectable(true);
         logView.setPadding(dp(12), dp(12), dp(12), dp(12));
-        logView.setBackgroundColor(Color.rgb(12, 15, 20));
+        logView.setBackground(round(Color.rgb(10, 13, 18), 14));
         root.addView(logView, margins(0, 8, 0, 0));
         return outer;
     }
 
-    private TextView section(String s) {
-        TextView t = text(s, 18, Color.WHITE, true);
-        t.setPadding(0, dp(6), 0, dp(2));
+    private void bootstrap() {
+        runAction("BOOTSTRAPPING", engine::smartBootstrap, null);
+    }
+
+    private void pairAndBootstrap() {
+        final String code = pairingCode.getText().toString();
+        runAction("PAIRING", () -> engine.pairAndBootstrap(code), null);
+    }
+
+    private void verify() {
+        runAction("VERIFYING", () -> {
+            AdbEngine.State state = engine.detect();
+            return state.active
+                    ? "VERIFIED: localhost ADB is uid=2000(shell).\n" + state.identity
+                    : state.message;
+        }, null);
+    }
+
+    private void rotatePort() {
+        runAction("ROTATING PORT", engine::rotatePort, null);
+    }
+
+    private void disableAdb() {
+        runAction("DISABLING", engine::disable, null);
+    }
+
+    private void startShizuku() {
+        runAction("STARTING SHIZUKU", engine::startShizuku, null);
+    }
+
+    private void runShell() {
+        final String command = shellCommand.getText().toString();
+        runAction("RUNNING SHELL", () -> engine.runShell(command), output -> shellOutput.setText(output));
+    }
+
+    private void runAction(String busy, Action action, OutputConsumer consumer) {
+        setBusy(busy);
+        worker.submit(() -> {
+            String output;
+            try {
+                output = action.run();
+            } catch (Throwable t) {
+                output = "ERROR: " + t;
+            }
+            append(output);
+            AdbEngine.State state = engine.detect();
+            final String f = output;
+            runOnUiThread(() -> {
+                if (consumer != null) consumer.accept(f);
+                applyState(state);
+                toast(shortToast(f));
+                requestTileRefresh();
+            });
+        });
+    }
+
+    private void refreshState(String busy) {
+        setBusy(busy);
+        worker.submit(() -> {
+            AdbEngine.State state = engine.detect();
+            runOnUiThread(() -> {
+                applyState(state);
+                requestTileRefresh();
+            });
+        });
+    }
+
+    private void applyState(AdbEngine.State state) {
+        if (state.active) {
+            statusTitle.setText("ACTIVE · NO-WIFI ADB READY");
+            statusTitle.setTextColor(GREEN);
+            statusDetail.setText("127.0.0.1:" + state.port + " · verified uid=2000(shell) / u:r:shell:s0");
+        } else {
+            statusTitle.setText("INACTIVE · BOOTSTRAP NEEDED");
+            statusTitle.setTextColor(BLUE);
+            statusDetail.setText(state.message);
+        }
+        keyState.setText("ADB host key: " + (engine.pairingKeyLooksPresent() ? "saved in app-private storage ✓" : "not created yet"));
+    }
+
+    private void setBusy(String value) {
+        runOnUiThread(() -> {
+            if (statusTitle != null) {
+                statusTitle.setText(value);
+                statusTitle.setTextColor(BLUE);
+            }
+            if (statusDetail != null) statusDetail.setText("Working…");
+        });
+    }
+
+    private void openWirelessDebugging() {
+        try {
+            startActivity(new Intent("android.settings.WIRELESS_DEBUGGING_SETTINGS"));
+        } catch (Throwable first) {
+            try {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
+            } catch (Throwable ignored) {
+                toast("Could not open Developer options");
+            }
+        }
+    }
+
+    private void requestTile() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                TileService.requestAddTileService(
+                        this,
+                        new ComponentName(this, AdbTileService.class),
+                        "No-WiFi ADB",
+                        Icon.createWithResource(this, R.drawable.ic_adb_tile),
+                        getMainExecutor(),
+                        result -> toast("Quick Settings tile request result: " + result));
+            } catch (Throwable t) {
+                toast("Open Quick Settings edit and add No-WiFi ADB manually");
+            }
+        } else {
+            toast("Open Quick Settings edit and add No-WiFi ADB");
+        }
+    }
+
+    private void requestTileRefresh() {
+        try {
+            TileService.requestListeningState(this, new ComponentName(this, AdbTileService.class));
+        } catch (Throwable ignored) { }
+    }
+
+    private TextView section(String value) {
+        TextView t = text(value, 18, Color.WHITE, true);
+        t.setPadding(0, dp(18), 0, dp(2));
         return t;
     }
 
     private EditText input(String hint, boolean numeric) {
         EditText e = new EditText(this);
         e.setHint(hint);
-        e.setHintTextColor(Color.rgb(125, 134, 146));
+        e.setHintTextColor(Color.rgb(123, 135, 151));
         e.setTextColor(Color.WHITE);
         e.setTextSize(15);
         e.setSingleLine(true);
-        e.setPadding(dp(12), dp(10), dp(12), dp(10));
-        e.setBackgroundColor(Color.rgb(28, 32, 39));
+        e.setPadding(dp(14), dp(11), dp(14), dp(11));
+        e.setBackground(round(CARD_2, 15));
         if (numeric) e.setInputType(InputType.TYPE_CLASS_NUMBER);
         return e;
     }
 
-    private Button button(String label, View.OnClickListener l) {
+    private Button primaryButton(String label, View.OnClickListener listener) {
+        return styledButton(label, Color.rgb(31, 111, 158), listener);
+    }
+
+    private Button secondaryButton(String label, View.OnClickListener listener) {
+        return styledButton(label, Color.rgb(30, 36, 45), listener);
+    }
+
+    private Button dangerButton(String label, View.OnClickListener listener) {
+        return styledButton(label, Color.rgb(70, 35, 39), listener);
+    }
+
+    private Button styledButton(String label, int color, View.OnClickListener listener) {
         Button b = new Button(this);
         b.setAllCaps(false);
         b.setText(label);
+        b.setTextColor(Color.WHITE);
         b.setTextSize(15);
         b.setGravity(Gravity.CENTER);
-        b.setOnClickListener(l);
-        b.setLayoutParams(margins(0, 6, 0, 0));
+        b.setMinHeight(dp(52));
+        b.setPadding(dp(12), dp(10), dp(12), dp(10));
+        b.setBackground(round(color, 15));
+        b.setOnClickListener(listener);
+        b.setLayoutParams(margins(0, 8, 0, 0));
         return b;
     }
 
@@ -167,6 +345,13 @@ public final class MainActivity extends Activity {
         return t;
     }
 
+    private GradientDrawable round(int color, int radiusDp) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(dp(radiusDp));
+        return d;
+    }
+
     private LinearLayout.LayoutParams margins(int l, int t, int r, int b) {
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         lp.setMargins(dp(l), dp(t), dp(r), dp(b));
@@ -177,245 +362,15 @@ public final class MainActivity extends Activity {
         return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
     }
 
-    private int dp(int v) {
-        return Math.round(v * getResources().getDisplayMetrics().density);
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
-    private void openWirelessDebugging() {
-        try {
-            startActivity(new Intent("android.settings.WIRELESS_DEBUGGING_SETTINGS"));
-        } catch (Throwable t) {
-            try {
-                startActivity(new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS));
-            } catch (Throwable t2) {
-                toast("Could not open Developer options");
-            }
-        }
-    }
-
-    private void autoBootstrap() {
-        final String pair = pairingEndpoint.getText().toString().trim();
-        final String code = pairingCode.getText().toString().trim();
-        final String debug = debugEndpoint.getText().toString().trim();
-        if (pair.isEmpty() || code.isEmpty() || debug.isEmpty()) {
-            toast("Enter pairing address/port, pairing code, and debug address/port");
-            return;
-        }
-        runAsync("Automatic bootstrap running", () -> {
-            Result pairResult = pairInternal(endpoint(pair), code);
-            if (!pairResult.ok) return "PAIR FAILED\n" + pairResult.output;
-            Result connect = connectInternal(endpoint(debug));
-            if (!connect.ok) return "CONNECT FAILED\n" + connect.output;
-            return bootstrapInternal(endpoint(debug));
-        });
-    }
-
-    private void pairOnly() {
-        final String pair = pairingEndpoint.getText().toString().trim();
-        final String code = pairingCode.getText().toString().trim();
-        if (pair.isEmpty() || code.isEmpty()) {
-            toast("Enter pairing address/port and code");
-            return;
-        }
-        runAsync("Pairing", () -> pairInternal(endpoint(pair), code).output);
-    }
-
-    private void connectWirelessOnly() {
-        final String debug = debugEndpoint.getText().toString().trim();
-        if (debug.isEmpty()) {
-            toast("Enter the Wireless debugging IP address & port");
-            return;
-        }
-        runAsync("Connecting Wireless ADB", () -> connectInternal(endpoint(debug)).output);
-    }
-
-    private void bootstrapOnly() {
-        final String debug = debugEndpoint.getText().toString().trim();
-        if (debug.isEmpty()) {
-            toast("Enter the Wireless debugging IP address & port");
-            return;
-        }
-        runAsync("Bootstrapping TCP 5555", () -> {
-            String ep = endpoint(debug);
-            Result connect = connectInternal(ep);
-            if (!connect.ok) return "CONNECT FAILED\n" + connect.output;
-            return bootstrapInternal(ep);
-        });
-    }
-
-    private void disableTcp() {
-        runAsync("Returning adbd to USB mode", () -> {
-            Result r = adb(Arrays.asList("-s", "127.0.0.1:5555", "usb"), null, 15);
-            return r.output + "\nThe localhost transport should close shortly.";
-        });
-    }
-
-    private Result pairInternal(String ep, String code) {
-        append("=== PAIR " + ep + " ===");
-        adb(Arrays.asList("kill-server"), null, 8);
-        Result r = adb(Arrays.asList("pair", ep), code + "\n", 20);
-        append(r.output);
-        boolean ok = r.exitCode == 0 && r.output.toLowerCase(Locale.US).contains("successfully paired");
-        if (!ok && r.exitCode == 0) ok = !r.output.toLowerCase(Locale.US).contains("failed");
-        return new Result(ok, r.exitCode, r.output);
-    }
-
-    private Result connectInternal(String ep) {
-        append("=== CONNECT " + ep + " ===");
-        Result r = adb(Arrays.asList("connect", ep), null, 15);
-        append(r.output);
-        Result devices = adb(Arrays.asList("devices", "-l"), null, 8);
-        append(devices.output);
-        String low = r.output.toLowerCase(Locale.US);
-        boolean ok = r.exitCode == 0 && (low.contains("connected to") || low.contains("already connected"));
-        return new Result(ok, r.exitCode, r.output + "\n" + devices.output);
-    }
-
-    private String bootstrapInternal(String wirelessEp) {
-        append("=== REQUEST adbd TCP:5555 THROUGH " + wirelessEp + " ===");
-        Result tcp = adb(Arrays.asList("-s", wirelessEp, "tcpip", "5555"), null, 20);
-        append(tcp.output);
-        if (tcp.exitCode != 0 || !tcp.output.toLowerCase(Locale.US).contains("tcp")) {
-            return "TCPIP REQUEST FAILED\n" + tcp.output;
-        }
-
-        sleep(2600);
-        Result lastConnect = null;
-        for (int i = 1; i <= 6; i++) {
-            append("localhost reconnect attempt " + i + "/6");
-            lastConnect = adb(Arrays.asList("connect", "127.0.0.1:5555"), null, 8);
-            append(lastConnect.output);
-            if (lastConnect.output.toLowerCase(Locale.US).contains("connected")) break;
-            sleep(1000);
-        }
-
-        String test = testLocalhostInternal();
-        if (test.contains("uid=2000")) {
-            return "SUCCESS: classic localhost ADB is active.\n" + test
-                    + "\n\nNow turn Wi-Fi OFF and press ‘Test localhost:5555 shell’. If uid=2000(shell) remains, the no-Wi-Fi path is proven for this boot.";
-        }
-        return "TCP 5555 was requested, but localhost shell verification failed.\n" + test
-                + (lastConnect == null ? "" : "\n" + lastConnect.output);
-    }
-
-    private String testLocalhostInternal() {
-        append("=== TEST 127.0.0.1:5555 ===");
-        boolean raw = rawPortOpen();
-        append("Raw TCP socket: " + (raw ? "OPEN" : "closed/unreachable"));
-        if (!raw) return "127.0.0.1:5555 is not listening.";
-
-        Result connect = adb(Arrays.asList("connect", "127.0.0.1:5555"), null, 10);
-        append(connect.output);
-        Result id = adb(Arrays.asList("-s", "127.0.0.1:5555", "shell", "id"), null, 12);
-        append("shell id: " + oneLine(id.output));
-        if (id.exitCode == 0 && id.output.contains("uid=2000")) {
-            return "LOCALHOST ADB WORKS: " + oneLine(id.output);
-        }
-        return "Port is open, but ADB shell failed: " + oneLine(id.output);
-    }
-
-    private boolean rawPortOpen() {
-        try (Socket s = new Socket()) {
-            s.connect(new InetSocketAddress("127.0.0.1", 5555), 1000);
-            return true;
-        } catch (Throwable ignored) {
-            return false;
-        }
-    }
-
-    private Result adb(List<String> args, String stdin, int timeoutSeconds) {
-        List<String> command = new ArrayList<>();
-        command.add(adbPath());
-        command.addAll(args);
-        append("$ adb " + String.join(" ", args));
-        Process p = null;
-        try {
-            ProcessBuilder pb = new ProcessBuilder(command);
-            pb.directory(getFilesDir());
-            pb.redirectErrorStream(true);
-            pb.environment().put("HOME", getFilesDir().getAbsolutePath());
-            pb.environment().put("TMPDIR", getCacheDir().getAbsolutePath());
-            p = pb.start();
-
-            if (stdin != null) {
-                try (PrintWriter w = new PrintWriter(new OutputStreamWriter(p.getOutputStream()))) {
-                    w.print(stdin);
-                    w.flush();
-                }
-            }
-
-            StringBuilder out = new StringBuilder();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            Thread collector = new Thread(() -> {
-                try {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        synchronized (out) { out.append(line).append('\n'); }
-                    }
-                } catch (Throwable ignored) { }
-            }, "adb-output");
-            collector.start();
-
-            boolean finished = p.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-            if (!finished) {
-                p.destroyForcibly();
-                collector.join(1000);
-                String s;
-                synchronized (out) { s = out.toString(); }
-                return new Result(false, 124, s + "TIMEOUT after " + timeoutSeconds + "s\n");
-            }
-            collector.join(1500);
-            String s;
-            synchronized (out) { s = out.toString(); }
-            return new Result(p.exitValue() == 0, p.exitValue(), s.trim());
-        } catch (Throwable t) {
-            if (p != null) p.destroyForcibly();
-            return new Result(false, 127, t.getClass().getSimpleName() + ": " + t.getMessage());
-        }
-    }
-
-    private String adbPath() {
-        return getApplicationInfo().nativeLibraryDir + File.separator + "libadb.so";
-    }
-
-    private String endpoint(String raw) {
-        String s = raw.trim().replace(" ", "");
-        if (s.startsWith("[")) return s;
-        if (s.contains(":")) return s;
-        return "127.0.0.1:" + s;
-    }
-
-    private void runAsync(String busy, Task task) {
-        setStatus(busy + "…");
-        worker.submit(() -> {
-            String result;
-            try {
-                result = task.run();
-            } catch (Throwable t) {
-                result = "ERROR: " + t;
-                append(result);
-            }
-            final String f = result;
-            runOnUiThread(() -> {
-                if (f.contains("SUCCESS") || f.contains("LOCALHOST ADB WORKS")) {
-                    status.setTextColor(Color.rgb(135, 235, 170));
-                } else {
-                    status.setTextColor(Color.rgb(138, 216, 255));
-                }
-                status.setText(f);
-            });
-        });
-    }
-
-    private void setStatus(String s) {
-        runOnUiThread(() -> status.setText(s));
-    }
-
-    private void append(String s) {
-        if (s == null || s.isEmpty()) return;
+    private void append(String value) {
+        if (value == null || value.isEmpty()) return;
         String stamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(new Date());
         synchronized (log) {
-            for (String line : s.split("\\r?\\n")) {
+            for (String line : value.split("\\r?\\n")) {
                 log.append(stamp).append("  ").append(line).append('\n');
             }
         }
@@ -427,36 +382,23 @@ public final class MainActivity extends Activity {
     }
 
     private void copyLog() {
-        String s;
-        synchronized (log) { s = log.toString(); }
+        String value;
+        synchronized (log) { value = log.toString(); }
         ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        cb.setPrimaryClip(ClipData.newPlainText("No-WiFi ADB log", s));
-        toast("Log copied");
+        cb.setPrimaryClip(ClipData.newPlainText("No-WiFi ADB diagnostic log", value));
+        toast("Diagnostic log copied");
     }
 
-    private String oneLine(String s) {
-        if (s == null) return "";
-        return s.trim().replace('\n', ' ').replace('\r', ' ');
+    private String shortToast(String value) {
+        if (value == null || value.isEmpty()) return "Done";
+        String first = value.split("\\r?\\n", 2)[0];
+        return first.length() > 90 ? first.substring(0, 90) + "…" : first;
     }
 
-    private void toast(String s) {
-        Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+    private void toast(String value) {
+        Toast.makeText(this, value, Toast.LENGTH_LONG).show();
     }
 
-    private void sleep(long ms) {
-        try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-    }
-
-    private interface Task { String run() throws Exception; }
-
-    private static final class Result {
-        final boolean ok;
-        final int exitCode;
-        final String output;
-        Result(boolean ok, int exitCode, String output) {
-            this.ok = ok;
-            this.exitCode = exitCode;
-            this.output = output == null ? "" : output;
-        }
-    }
+    private interface Action { String run() throws Exception; }
+    private interface OutputConsumer { void accept(String value); }
 }
