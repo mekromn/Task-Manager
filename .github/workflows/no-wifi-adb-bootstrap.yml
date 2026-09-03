@@ -1,0 +1,88 @@
+name: Build No-WiFi ADB Bootstrap
+
+on:
+  push:
+    branches: [ "scratch/no-wifi-adb-probe" ]
+    paths:
+      - "scratch/NoWifiAdbBootstrap/**"
+      - ".github/workflows/no-wifi-adb-bootstrap.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.0"
+
+      - name: Fetch pinned LADB ADB client
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="scratch/NoWifiAdbBootstrap/app/src/main/jniLibs/arm64-v8a/libadb.so"
+          mkdir -p "$(dirname "$DEST")"
+          curl --fail --location --retry 3 \
+            "https://raw.githubusercontent.com/tytydraco/LADB/60f48029cf9d8e0bc848ca41a7bd76694d4ab796/app/src/main/jniLibs/arm64-v8a/libadb.so" \
+            --output "$DEST"
+          test "$(stat -c%s "$DEST")" = "5142600"
+          chmod 755 "$DEST"
+          file "$DEST"
+
+      - name: Compile debug APK
+        run: gradle -p scratch/NoWifiAdbBootstrap :app:assembleDebug --stacktrace
+
+      - name: Prepare and verify artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          APK="scratch/NoWifiAdbBootstrap/app/build/outputs/apk/debug/app-debug.apk"
+          OUT="artifacts/No-WiFi-ADB-v0.2-debug.apk"
+          cp "$APK" "$OUT"
+          cp scratch/NoWifiAdbBootstrap/licenses/LADB-LICENSE.txt artifacts/LADB-LICENSE.txt
+          sha256sum "$OUT" | tee artifacts/No-WiFi-ADB-v0.2-debug.apk.sha256
+
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
+          EXPECTED_CERT="a0f2c69a8401c530442165beb5b2972dbbc8127472d5ad75c16bbcc172558983"
+          "$APKSIGNER" verify --verbose --print-certs "$OUT"
+          ACTUAL_CERT=$("$APKSIGNER" verify --print-certs "$OUT" | awk -F': ' '/certificate SHA-256 digest/ {print tolower($2); exit}')
+          test "$ACTUAL_CERT" = "$EXPECTED_CERT"
+
+          PACKAGE_LINE=$("$AAPT" dump badging "$OUT" | head -n 1)
+          echo "$PACKAGE_LINE"
+          grep -q "name='com.mekromn.nowifiadb'" <<<"$PACKAGE_LINE"
+          VERSION_CODE=$(sed -n "s/.*versionCode='\([0-9][0-9]*\)'.*/\1/p" <<<"$PACKAGE_LINE")
+          EXPECTED_VERSION_CODE=$((200000 + GITHUB_RUN_NUMBER))
+          test "$VERSION_CODE" = "$EXPECTED_VERSION_CODE"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: No-WiFi-ADB-v0.2
+          path: artifacts/
+          if-no-files-found: error
