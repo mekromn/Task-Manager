@@ -1,16 +1,34 @@
 # No-WiFi ADB v0.3
 
-Rootless Android 16 experiment for recovering ADB after reboot without joining an external Wi-Fi network.
+Rootless Android 16 utility that converts an authenticated Wireless Debugging transport into classic `adbd` TCP and then uses the real ADB shell through localhost after Wi-Fi is disconnected.
 
-## One-time preparation
+## Proven foundation
 
-Install v0.3 over v0.2 while the proven `127.0.0.1:5555` ADB shell is still alive. v0.3 declares `WRITE_SECURE_SETTINGS` and uses that already-authorized shell to grant the protected permission to itself once. The package, app data, paired ADB host key, and permission grant survive ordinary reboots.
+On Pixel 9 Pro XL / Android 16, v0.2 successfully paired to the phone's own Wireless Debugging service, sent `adb tcpip 5555`, reconnected to `127.0.0.1:5555`, and verified the real `uid=2000(shell)` / `u:r:shell:s0` context after Wi-Fi loss.
 
-## Reboot recovery experiment
+## v0.3 productionization
 
-After reboot with normal Wi-Fi unavailable, the app starts a public-API `LocalOnlyHotspot`, rapidly cycles `Settings.Global` key `adb_wifi_enabled`, and scans `_adb-tls-connect._tcp`. This automates the Android 16 hotspot / Wireless Debugging race reported and reproduced publicly in March 2026. If the encrypted local ADB service survives long enough, the already-paired embedded ADB client connects to it and immediately sends `adb tcpip 5555`, restoring the same `uid=2000(shell)` localhost path proven by v0.2.
+- Automatic `_adb-tls-connect._tcp` discovery; no manual IP or debug-port entry.
+- First-time `_adb-tls-pairing._tcp` discovery; the user enters only Android's six-digit pairing code.
+- ADB host key is kept in app-private storage and survives APK updates.
+- New bootstraps choose a random high classic-ADB port rather than fixed port 5555.
+- v0.2 port 5555 is still detected so v0.3 can update in place without breaking an already-active session.
+- Every active state is verified with `shell id` and requires `uid=2000` plus `u:r:shell:s0`.
+- Built-in shell command runner.
+- One-tap Shizuku starter using Shizuku's standard ADB start script.
+- Disable action returns `adbd` to USB mode.
+- Quick Settings tile reports the local listener; tap while active disables TCP mode, tap while inactive opens the app.
+- Android 16 edge-to-edge system-bar insets are handled correctly.
 
-LocalOnlyHotspot may not trigger the exact race on every Pixel build. v0.3 keeps a manual Mobile Hotspot fallback button for that case.
+The production manifest requests only `android.permission.INTERNET`. It does not request location, Nearby Wi-Fi, Wi-Fi control, accessibility, root, Shizuku, or `WRITE_SECURE_SETTINGS` permissions.
+
+## Security boundary
+
+Normal ADB authentication remains enabled. Stock `adb tcpip` does not bind only to loopback; while a network interface is up, the randomly selected port may also listen on that interface. The random port reduces accidental exposure but is not treated as a security boundary. The ADB host-key challenge remains the authorization boundary. With Wi-Fi disconnected, the app continues through `127.0.0.1`.
+
+## Reboot behavior
+
+Classic TCP mode survives Wi-Fi loss but not a full reboot/adbd restart on stock Android. v0.3 deliberately does not ship the unproven protected-settings/hotspot race experiment as its default path. Reboot recovery and loopback-only binding are separate research targets after this production path is validated.
 
 ## ADB binary
 
